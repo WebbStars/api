@@ -6,6 +6,7 @@ const Vaga = db.vaga;
 const validator = require("validator");
 var jwt = require("jsonwebtoken");
 var bcrypt = require("bcryptjs");
+const axios = require('axios');
 
 exports.signup = (req, res) => {
 
@@ -93,7 +94,8 @@ exports.signup = (req, res) => {
           res.status(500).send({ message: err });
           return;
         }
-
+        
+        user.numero_de_identificacao = req.body.numero_de_identificacao
         user.roles = [role._id];
         user.save(err => {
           if (err) {
@@ -108,49 +110,66 @@ exports.signup = (req, res) => {
   });
 };
 
-exports.signin = (req, res) => {
-  User.findOne({
-    email: req.body.email
-  })
-    .populate("roles", "-__v")
-    .exec((err, user) => {
-      if (err) {
-        res.status(500).send({ message: err });
-        return;
-      }
+const AupairProfile = require("../models/aupairProfile.model.js");
 
-      if (!user) {
-        return res.status(404).send({ message: "User Not found." });
-      }
+exports.signin = async (req, res) => {
+  try {
+    const { email, password } = req.body;
 
-      var passwordIsValid = bcrypt.compareSync(
-        req.body.password,
-        user.password
-      );
+    // Encontra o usuário com o email fornecido
+    const user = await User.findOne({ email }).populate("roles", "-__v");
 
-      if (!passwordIsValid) {
-        return res.status(401).send({
-          accessToken: null,
-          message: "Invalid Password!"
-        });
-      }
+    if (!user) {
+      return res.status(404).send({ message: "Usuário não encontrado" });
+    }
 
-      var authorities = [];
+    // Verifica se a senha fornecida é válida
+    const passwordIsValid = bcrypt.compareSync(password, user.password);
 
-      for (let i = 0; i < user.roles.length; i++) {
-        authorities.push("ROLE_" + user.roles[i].name.toUpperCase());
-      }
-
-      var token = jwt.sign({ id: user.id, roles: authorities }, config.secret, {
-        expiresIn: 86400 // 24 hours
+    if (!passwordIsValid) {
+      return res.status(401).send({
+        accessToken: null,
+        message: "Senha inválida"
       });
+    }
 
-      res.status(200).send({
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        roles: authorities,
-        accessToken: token
-      });
+    // Gera o token de autenticação
+    const authorities = user.roles.map((role) => "ROLE_" + role.name.toUpperCase());
+
+    const token = jwt.sign({ id: user.id, roles: authorities }, config.secret, {
+      expiresIn: 86400 // 24 horas
     });
+
+    // Verifica se o usuário já possui um perfil de au pair
+    const profile = await AupairProfile.findOne({ user: user._id });
+
+    const firstLogin = !profile;
+
+    // Obtém a localização do usuário a partir do endereço IP
+    const ipAddresses = req.headers["x-forwarded-for"] || req.connection.remoteAddress;
+    const ipAddress = ipAddresses.split(',')[0];
+    const ipstackApiKey = process.env.IPSTACK_API; // substitua pela sua API key do IP Geolocation API
+    const ipstackApiUrl = `http://api.ipstack.com/${ipAddress}?access_key=${ipstackApiKey}`;
+    const response = await axios.get(ipstackApiUrl);
+    const location = response.data.city + ', ' + response.data.region_name + ', ' + response.data.country_name;
+
+    // Registra o login do usuário no histórico de login
+    user.loginHistory.push({ ipAddress, location });
+    await user.save();
+
+    // Retorna os dados do usuário e o token de autenticação
+    res.status(200).send({
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      roles: authorities,
+      accessToken: token,
+      firstLogin
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Erro interno do servidor" });
+  }
 };
+
+

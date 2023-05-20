@@ -4,8 +4,8 @@ info:
   description: API para um sistema de AuPair
   version: 1.0.0
 servers:
+  - url: https://aupamatch-api3.onrender.com/api
   - url: http://localhost:8080/api
-  - url: https://aupamatch-api3.render.com/api
 
 securityDefinitions:
   jwt:
@@ -20,8 +20,8 @@ paths:
       summary: Registra um novo usuário
       tags:
       - Auth
-      operationId: signup
       requestBody:
+        required: true
         content:
           application/json:
             schema:
@@ -30,43 +30,33 @@ paths:
                 email:
                   type: string
                   format: email
-                  description: E-mail do usuário
+                  description: Endereço de e-mail do usuário
                 password:
                   type: string
-                  format: password
+                  minLength: 8
                   description: Senha do usuário
                 name:
                   type: string
-                  description: Nome do usuário
+                  description: Nome completo do usuário
                 roles:
                   type: string
-                  enum:
-                    - user
-                    - aupair
-                    - family
-                    - agency
-                  description: Papel do usuário
+                  description: Nível de permissão do usuário
+                  enum: [user, aupair, family, agency]
+                numero_de_identificacao:
+                  type: string
+                  description: Número de identificação da agência (apenas para usuários com permissão "agency")
               required:
                 - email
                 - password
                 - name
                 - roles
       responses:
-        "200":
+        '200':
           description: Usuário registrado com sucesso
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                    description: Mensagem de confirmação
-        "400":
-          description: Dados inválidos
-        "500":
-          description: Erro interno do servidor
-      security: []
+        '400':
+          description: Dados de entrada inválidos
+        '500':
+          description: Ocorreu um erro no servidor
     x-middleware:
       - name: checkDuplicateUsernameOrEmail
         description: Verifica se já existe um usuário com o mesmo e-mail ou nome de usuário
@@ -126,6 +116,9 @@ paths:
                   accessToken:
                     type: string
                     description: Token de acesso para o usuário
+                  firstLogin:
+                    type: boolean
+                    description: Primeiro Login
         "401":
           description: Credenciais inválidas
         "404":
@@ -133,6 +126,224 @@ paths:
         "500":
           description: Erro interno do servidor
       security: []
+  /userprofile:
+    get:
+      parameters:
+      - name: x-access-token
+        in: header
+        description: Token de autenticação
+        required: true
+        type: string
+      tags:
+        - "User"
+      summary: "Get user profile"
+      description: "Returns the profile of the user authenticated by the provided JWT token."
+      produces:
+        - "application/json"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+
+        "401":
+          $ref: "#/responses/UnauthorizedError"
+        "404":
+          $ref: "#/responses/NotFoundError"
+    put:
+      summary: Atualiza as credenciais do usuário
+      parameters:
+      - name: x-access-token
+        in: header
+        description: Token de autenticação
+        required: true
+        type: string
+      tags:
+        - "User"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+                  description: Nova senha do usuário
+                name:
+                  type: string
+                  description: Novo nome do usuário
+                currentPassword:
+                  type: string
+                  description: Senha atual do usuário (obrigatório)
+              required:
+                - currentPassword
+      responses:
+        '200':
+          description: Usuário atualizado com sucesso
+        '400':
+          description: Solicitação malformada, algum dos atributos não fornecidos
+        '401':
+          description: A senha atual fornecida é inválida
+        '404':
+          description: Usuário não encontrado
+        '500':
+          description: Erro interno do servidor ao atualizar as credenciais do usuário
+
+  /send-token:
+      post:
+        tags:
+          - "Recuperar senha"
+        summary: Envia um e-mail com um código para redefinir a senha.
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                    description: Endereço de e-mail do usuário.
+                required:
+                  - email
+        responses:
+          '200':
+            description: E-mail enviado com sucesso.
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    message:
+                      type: string
+                      description: Mensagem de sucesso.
+          '400':
+            description: Parâmetros inválidos ou código expirado.
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    message:
+                      type: string
+                      description: Mensagem de erro.
+          '404':
+            description: E-mail não encontrado.
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    message:
+                      type: string
+                      description: Mensagem de erro.
+          '500':
+            description: Erro interno do servidor.
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    message:
+                      type: string
+                      description: Mensagem de erro.
+  /validate-token:
+    post:
+      tags:
+        - "Recuperar senha"
+      summary: Verifica se o código de redefinição de senha é válido.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  description: Endereço de e-mail do usuário.
+                code:
+                  type: string
+                  description: Código de redefinição de senha.
+              required:
+                - email
+                - code
+      responses:
+        '200':
+          description: Código válido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Mensagem de sucesso.
+        '400':
+          description: Código inválido ou expirado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Mensagem de erro.
+        '404':
+          description: E-mail não encontrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Mensagem de erro.
+        '500':
+          description: Erro interno do servidor.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Mensagem de erro.
+  /reset-password:
+    patch:
+      tags:
+        - "Recuperar senha"
+
+      summary: Redefinir a senha de um usuário.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: O email do usuário que deseja redefinir a senha.
+                password:
+                  type: string
+                  description: A nova senha do usuário.
+              required:
+                - email
+                - password
+      responses:
+        '200':
+          description: Senha redefinida com sucesso.
+        '400':
+          description: Código inválido.
+        '404':
+          description: Email não encontrado.
+        '500':
+          description: Erro interno do servidor.
   /vagas:
     get:
       summary: "Listar vagas"
@@ -175,10 +386,9 @@ paths:
                   habilitacao: true
                   carro_exclusivo: false
                   views: 6
+                  isSaved: false
                   user: ["6400075f0e87cc0035ceceeb"]
                   resumo: "Procuramos uma au pair para cuidar de nossos filhos durante a semana"
-                  passaporte: "123456789"
-                  aupair: []
                   createdAt: "2023-03-06T23:32:08.784Z"
                   updatedAt: "2023-03-07T00:06:26.162Z"
                   __v: 0
@@ -278,11 +488,51 @@ paths:
                 type: string
                 description: Mensagem de erro
                 example: Vaga não encontrada
-  /perfil:
-    post:
-      summary: Cria um perfil de Au Pair
+    put:
+      summary: Atualiza uma vaga existente
       tags:
-        - Perfil
+        - "Minhas vagas"
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+          description: ID da vaga a ser atualizada
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+        - name: body
+          in: body
+          description: Parâmetros para a alteração da vaga
+          required: true
+          schema:
+            type: object
+            properties:
+              titulo_vaga:
+                type: string
+                example: "Novo título para a vaga"
+              descricao:
+                type: string
+                example: "Nova descrição para a vaga"
+      responses:
+        '200':
+          description: Vaga alterada com sucesso
+          schema:
+            $ref: '#/definitions/Vaga'
+        '400':
+          description: Erro na requisição
+        '401':
+          description: Não autorizado
+        '403':
+          description: Token não fornecido
+  /vaga/{id}/toggle:
+    put:
+      summary: Ativar ou desativar uma vaga.
+      tags:
+        - Minhas vagas
       security:
         - bearerAuth: []
       parameters:
@@ -291,19 +541,97 @@ paths:
           description: Token de autenticação
           required: true
           type: string
+        - in: path
+          name: id
+          required: true
+          description: ID da vaga a ser ativada/desativada.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Vaga ativada/desativada com sucesso.
+          content:
+            application/json:
+              schema:
+                $ref: "#/definitions/Vaga"
+        '400':
+          description: Erro na requisição
+        '401':
+          description: Não autorizado
+        '403':
+          description: Token não fornecido
+  /login-history:
+    get:
+      tags:
+        - "User"
+      summary: Obtém o histórico de login do usuário autenticado
+      parameters:
+      - name: x-access-token
+        in: header
+        description: Token de autenticação
+        required: true
+        type: string
+      responses:
+        200:
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LoginHistory'
+        401:
+          $ref: '#/components/responses/Unauthorized'
+        500:
+          $ref: '#/components/responses/InternalServerError'
+  /perfil:
+    parameters:
+    - name: x-access-token
+      in: header
+      description: Token de autenticação
+      required: true
+      type: string
+    security:
+      - jwt: []
+    post:
+      summary: Cria um perfil de Au Pair.
+      tags:
+      - Perfil
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              $ref: '#/definitions/Aupair'
+              schema:
+                $ref: '#/components/schemas/AupairProfile'
+              
       responses:
         '201':
           description: Perfil criado com sucesso
           content:
             application/json:
-              schema:
-                $ref: '#/definitions/Aupair'
+              example:
+                telefone: "(11) 1234-5678"
+                cep: "01234-567"
+                logradouro: "Rua Teste"
+                numero: "123"
+                complemento: "Apto. 456"
+                cidade: "São Paulo"
+                estado: "SP"
+                data_de_nascimento: "1995-05-02"
+                escolaridade: "Ensino Superior Completo"
+                idiomas: ["Inglês", "Espanhol"]
+                religiao: "Católica"
+                genero: "Feminino"
+                nacionalidade: "Brasileira"
+                numero_identificacao_nacional: "123.456.789-00"
+                tipo_documento: "CPF"
+                habilitacao: true
+                quantidade_criancas: "2"
+                experiencia_trabalho: "1"
+                natacao: true
+                carro_exclusivo: false
+                receber_newsletter: true
+                data_disponibilidade: "2023-06-01"
         '400':
           description: Requisição inválida
         '401':
@@ -313,28 +641,18 @@ paths:
         '500':
           description: Erro do servidor
     get:
-      summary: Recupera o perfil do Au Pair logado
+      summary: Get the Aupair profile for the authenticated user
       tags:
-        - Perfil
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: x-access-token
-          in: header
-          description: Token de autenticação
-          required: true
-          type: string
+      - Perfil
       responses:
         '200':
-          description: Retorna o perfil do Au Pair
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/definitions/Aupair'
-        '401':
-          description: Não autorizado
+                $ref: '#/components/schemas/AupairProfile'
         '404':
-          description: Perfil não encontrado
+          description: Aupair profile not found
           content:
             application/json:
               schema:
@@ -347,7 +665,7 @@ paths:
                     type: boolean
                     example: true
         '500':
-          description: Erro do servidor
+          description: Server error
           content:
             application/json:
               schema:
@@ -356,13 +674,10 @@ paths:
                   message:
                     type: string
                     example: Server Error
-
     delete:
       summary: Exclui o perfil do usuário logado
       tags:
-        - Perfil
-      security:
-        - BearerAuth: []
+      - Perfil
       responses:
         '200':
           description: Perfil excluído com sucesso
@@ -372,23 +687,35 @@ paths:
           description: Token não fornecido
         '404':
           description: Perfil não encontrado
-      servers:
-        - url: http://localhost:3000
+      /aupair-profile:
+    put:
+      summary: Atualiza o perfil da aupair
+      description: Atualiza os atributos do perfil da aupair com os valores enviados na requisição
+      tags:
+      - Perfil
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                message:
-                  type: string
-                  description: Mensagem opcional para inclusão no corpo da requisição
+            schema: 
+              $ref: '#/components/schemas/AupairProfile'
+             
+      responses:
+        200:
+          description: Perfil da aupair atualizado com sucesso
+        400:
+          description: Atributos inválidos na requisição
+        403:
+          description: Usuário não tem permissão para editar este perfil
+        404:
+          description: Perfil da aupair não encontrado
+        500:
+          description: Erro ao atualizar o perfil da aupair
   /favoritar/{id}:
     post:
       summary: Favoritar uma vaga
       tags:
-      - Favoritar
+      - Favoritos
       description: >
         Adiciona ou remove a vaga com o ID especificado à lista de vagas favoritas do usuário autenticado.
       operationId: favoritarVaga
@@ -420,7 +747,7 @@ paths:
     get:
       summary: Lista as vagas salvas por um(a) au pair
       tags:
-        - "Favoritar"
+        - "Favoritos"
       security:
         - bearerAuth: []
       parameters:
@@ -458,7 +785,6 @@ paths:
                   views: 6
                   user: ["6400075f0e87cc0035ceceeb"]
                   resumo: "Procuramos uma au pair para cuidar de nossos filhos durante a semana"
-                  passaporte: "123456789"
                   aupair: []
                   createdAt: "2023-03-06T23:32:08.784Z"
                   updatedAt: "2023-03-07T00:06:26.162Z"
@@ -516,7 +842,6 @@ paths:
                   views: 6
                   user: ["6400075f0e87cc0035ceceeb"]
                   resumo: "Procuramos uma au pair para cuidar de nossos filhos durante a semana"
-                  passaporte: "123456789"
                   aupair: []
                   createdAt: "2023-03-06T23:32:08.784Z"
                   updatedAt: "2023-03-07T00:06:26.162Z"
@@ -530,6 +855,389 @@ paths:
 
         500:
           description: Erro ao buscar vagas
+  /vagas/{id}:
+    get:
+      summary: Consultar uma vaga por ID
+      tags:
+        - "Minhas vagas"
+      description: Retorna uma única vaga correspondente ao ID fornecido, desde que a vaga tenha sido criada pelo usuário autenticado
+      parameters:
+        - in: path
+          name: id
+          description: ID da vaga a ser consultada
+          required: true
+          schema:
+            type: string
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+      responses:
+        '200':
+          description: Vaga encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/definitions/Vaga'
+        '400':
+          description: Erro na requisição
+        '401':
+          description: Não autorizado
+        '403':
+          description: Token não fornecido
+        '500':
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string       
+  /candidatar:
+    get:
+      summary: Cria uma nova candidatura à vaga
+      tags:
+        - "Candidaturas"
+      description: Cria uma nova candidatura à vaga correspondente ao ID fornecido na query string, desde que a au pair ainda não tenha se candidatado à mesma vaga.
+      parameters:
+        - name: vagaID
+          in: query
+          description: ID da vaga
+          required: true
+          type: string
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+
+      responses:
+        201:
+          description: Candidatura criada com sucesso
+        400:
+          description: Aupair já se candidatou a essa vaga
+        404:
+          description: Vaga não encontrada
+        500:
+          description: Erro interno do servidor
+  /minhas-candidaturas:
+    get:
+      summary: Retorna todas as candidaturas da Aupair
+      tags:
+        - "Candidaturas"
+      description: "Retorna todas as candidaturas da AuPair logada"
+      parameters:
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+      produces:
+        - "application/json"
+      security:
+        - bearerAuth: []
+      responses:
+        200:
+          description: "Candidaturas recuperadas com sucesso"
+        401:
+          $ref: "#/responses/UnauthorizedError"
+  /vagas/{id}/candidaturas:
+    delete:
+      summary: Remove candidatura da Au Pair para uma vaga
+      tags:
+       - "Candidaturas"
+      parameters:
+        - in: path
+          name: id
+          description: ID da vaga
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: Authorization
+          description: Token de autorização JWT
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Candidatura removida com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  data:
+                    type: object
+        '400':
+          description: Erro de validação
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        param:
+                          type: string
+                        msg:
+                          type: string
+                        value:
+                          type: string
+        '401':
+          description: Não autorizado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '404':
+          description: Vaga ou candidatura não encontrada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '500':
+          description: Erro interno do servidor
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+  /pagamento/publicador:
+    post:
+      tags:
+        - "Compras"
+      summary: Iniciar pagamento do publicador de vagas.
+      description: |
+        Endpoint utilizado para iniciar pagamento do publicador de vagas.
+
+        **Credenciais de usuário de teste:**
+        E-mail: sb-p7r5n25931191@personal.example.com
+        Senha: G8B>w)3s
+      parameters:
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+      responses:
+        '200':
+          description: URL de aprovação do pagamento
+          schema:
+            type: object
+            properties:
+              approvalUrl:
+                type: string
+                description: URL de aprovação do pagamento
+                example: https://www.paypal.com/cgi-bin/webscr?cmd=_express-checkout&token=EC-ABCD1234567890
+        '400':
+          description: Pagamento ja foi efetuado
+
+        '500':
+          description: Erro interno do servidor
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                description: Mensagem de erro
+  /pagamento/mais-candidaturas:
+    post:
+      tags:
+        - "Compras"
+      summary: Iniciar pagamento para mais que 5 candidaturas.
+      description: |
+        Endpoint utilizado para iniciar pagamento para mais que 5 candidaturas.
+
+        **Credenciais de usuário de teste:**
+        E-mail: sb-p7r5n25931191@personal.example.com
+        Senha: G8B>w)3s
+      parameters:
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+      responses:
+        '200':
+          description: URL de aprovação do pagamento
+          schema:
+            type: object
+            properties:
+              approvalUrl:
+                type: string
+                description: URL de aprovação do pagamento
+                example: https://www.paypal.com/cgi-bin/webscr?cmd=_express-checkout&token=EC-ABCD1234567890
+        '400':
+          description: Pagamento ja foi efetuado
+
+        '500':
+          description: Erro interno do servidor
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                description: Mensagem de erro
+  /pagamento/vaga-patrocinada/{id}:
+    post:
+      summary: Realiza o pagamento para tornar uma vaga patrocinada
+      tags:
+        - "Compras"
+      description: |
+        Este endpoint realiza o pagamento para tornar uma vaga patrocinada. É necessário estar autenticado como um usuário com permissões para editar a vaga. O pagamento altera o atributo vaga_patrocinada da vaga para true.
+         
+          **Credenciais de usuário de teste:**
+          E-mail: sb-p7r5n25931191@personal.example.com
+          Senha: G8B>w)3s  
+      parameters:
+        - in: path
+          name: id
+          description: ID da vaga a ser patrocinada
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: Authorization
+          description: Token de autenticação JWT
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Retorna a URL para aprovação do pagamento
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approvalUrl:
+                    type: string
+                    description: URL para aprovação do pagamento no PayPal
+        '400':
+          description: A vaga já é patrocinada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Mensagem de erro
+                    example: A vaga já é patrocinada.
+        '403':
+          description: Não há permissão para editar a vaga ou o pagamento é reservado às Famílias e Agências
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Mensagem de erro
+                    example: Você não tem permissão para editar esta vaga.
+        '500':
+          description: Erro ao realizar o pagamento
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: Mensagem de erro
+                    example: Ocorreu um erro ao realizar o pagamento.
+  /compra-history:
+    get:
+      summary: Retorna o histórico de compras do usuário logado
+      parameters:
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+      description: Retorna o histórico de compras do usuário logado com base em seu ID de usuário.
+      tags:
+        - "Compras"
+
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PurchaseHistory'
+        '401':
+          description: Usuário não autenticado
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                description: Mensagem de erro
+                example: Usuário não autenticado
+        '500':
+          description: Erro interno do servidor
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+                description: Mensagem de erro
+                example: Erro interno do servidor
+  /agenciar-vaga/{id}:
+    post:
+      summary: Agenciar uma vaga
+      tags: 
+        - Agência
+      parameters:
+        - name: x-access-token
+          in: header
+          description: Token de autenticação
+          required: true
+          type: string
+        - name: id
+          in: path
+          description: ID da vaga
+          required: true
+          type: string
+      responses:
+        '200':
+          description: Sucesso
+          schema:
+            $ref: '#/definitions/Vaga'
+        '403':
+          description: Permissão negada
+          schema:
+            $ref: '#/definitions/Error'
+        '404':
+          description: Vaga não encontrada
+          schema:
+            $ref: '#/definitions/Error'
+        '500':
+          description: Erro do servidor
+          schema:
+            $ref: '#/definitions/Error'
+
 
 definitions:
   Vaga:
@@ -622,8 +1330,6 @@ definitions:
         type: string
       resumo:
         type: string
-      passaporte:
-        type: string
       receber_newsletter:
         type: boolean
         default: false
@@ -638,9 +1344,6 @@ definitions:
       titulo_vaga:
         type: string
         default: Vaga sem título
-      vaga_patrocinada:
-        type: boolean
-        default: false
       pais:
         type: string
         default: ''
@@ -710,16 +1413,249 @@ definitions:
         format: date
       numero_identificacao_nacional:
         type: string
-      resumo:
-        type: string
       passaporte:
         type: string
-      habilitacao_pid:
-        type: string
 
+  UserProfileResponse:
+    type: "object"
+    properties:
+      id:
+        type: "string"
+        format: "uuid"
+        description: "User ID"
+      email:
+        type: "string"
+        description: "User email"
+      name:
+        type: "string"
+        description: "User name"
+      roles:
+        type: "array"
+        items:
+          type: "string"
+          description: "User roles"
+  Error:
+    type: "object"
+    properties:
+      message:
+        type: "string"
+        description: "Error message"
+  UnauthorizedError:
+    description: "Unauthorized Error"
+    schema:
+      $ref: "#/definitions/Error"
+  NotFoundError:
+    description: "Not Found Error"
+    schema:
+      $ref: "#/definitions/Error"
 components:
+  schemas:
+    UserProfileResponse:
+      type: object
+      oneOf:
+        - $ref: '#/components/schemas/UserProfileResponsePublicador'
+        - $ref: '#/components/schemas/UserProfileResponseMaisVagas'
+    UserProfileResponsePublicador:
+      type: object
+      properties:
+        _id:
+          type: string
+          description: The user ID
+        name:
+          type: string
+          description: The user name
+        email:
+          type: string
+          description: The user email
+        roles:
+          type: string
+        pagamentoPublicador:
+          type: boolean
+    UserProfileResponseMaisVagas:
+      type: object
+      properties:
+        _id:
+          type: string
+          description: The user ID
+        name:
+          type: string
+          description: The user name
+        email:
+          type: string
+          description: The user email
+        roles:
+          type: string
+        pagamentoMaisCandidaturas:
+          type: boolean
+
+
+    AupairProfile:
+            type: object
+            properties:
+              _id:
+                type: string
+                example: 60a8d542be99c540d45b90f9
+              nome_completo:
+                type: string
+                example: "Roberto Santos Silva"
+              telefone:
+                type: string
+                example: "+5511999999999"
+              cep:
+                type: string
+                example: "01234567"
+              logradouro:
+                type: string
+                example: "Rua A"
+              numero:
+                type: string
+                example: "123"
+              complemento:
+                type: string
+                example: "Apto 45"
+              cidade:
+                type: string
+                example: "São Paulo"
+              estado:
+                type: string
+                example: "SP"
+              data_de_nascimento:
+                type: string
+                format: date-time
+                example: "1990-01-01T00:00:00.000Z"
+              escolaridade:
+                type: string
+                example: "Ensino Superior Completo"
+              idiomas:
+                type: array
+                items:
+                  type: string
+                example: ["Inglês", "Espanhol"]
+              religiao:
+                type: string
+                example: "Católica"
+              genero:
+                type: string
+                example: "Feminino"
+              nacionalidade:
+                type: string
+                example: "Brasileira"
+              passaporte:
+                type: string
+                example: "AB123456"
+              habilitacao:
+                type: boolean
+                example: true
+              quantidade_criancas:
+                type: string
+                example: "3"
+              experiencia_trabalho:
+                type: string
+                example: "2 anos"
+              natacao:
+                type: boolean
+                example: true
+              carro_exclusivo:
+                type: boolean
+                example: true
+              receber_newsletter:
+                type: boolean
+                example: false
+              data_disponibilidade:
+                type: string
+                format: date-time
+                example: "2023-05-30T00:00:00.000Z"
+              numero_identificacao_nacional:
+                type: string
+                example: "1234567890"
+              tipo_documento:
+                type: string
+                example: "RG"
+              firstLogin:
+                type: boolean
+                example: false
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          description: The error message
+      required:
+        - message[]
+    LoginHistory:
+      type: object
+      properties:
+        _id:
+          type: string
+        date:
+          type: string
+          format: date-time
+        ipAddress:
+          type: string
+        location:
+          type: string
+      required:
+        - date
+        - ipAddress
+        - location
+    PurchaseHistory:
+      type: object
+      properties:
+        _id:
+          type: string
+          description: ID do histórico de compras
+          example: '6459ac9d51e9e90034840a5a'
+        date:
+          type: string
+          format: date-time
+          description: Data da compra
+          example: '2023-05-09T02:14:53.142Z'
+        product:
+          type: string
+          description: Nome do produto comprado
+          example: 'Vaga Patrocinada'
+        value:
+          type: number
+          description: Valor do produto comprado
+          example: 25
+      required:
+        - _id
+        - date
+        - product
+        - value
+ 
+ 
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: Não autorizado
+    InternalServerError:
+      description: Erro interno do servidor
+
+responses:
+  UnauthorizedError:
+    description: Usuário não autorizado a realizar a ação solicitada
+    content:
+      application/json:
+        schema:
+          type: object
+          properties:
+            message:
+              type: string
+              example: "Não autorizado"
+
+  NotFoundError:
+    description: Recurso solicitado não foi encontrado
+    content:
+      application/json:
+        schema:
+          type: object
+          properties:
+            message:
+              type: string
+              example: "Recurso não encontrado"

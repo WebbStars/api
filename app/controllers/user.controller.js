@@ -3,16 +3,20 @@ const { vaga, user, candidatura, familia_has_vaga } = require("../models");
 const db = require("../models");
 const User = db.user;
 const Vaga = db.vaga;
+var bcrypt = require("bcryptjs");
+const Visualizacao = db.visualizacao
 const Candidatura = db.candidatura;
 const mongoose = require('mongoose');
-const Familia_has_vaga = db.familia_has_vaga;
 const AupairProfile = db.aupairProfile;
 mongoose.Promise = global.Promise;
 const nodemailer = require("nodemailer");
+const paypal = require('paypal-rest-sdk');
 
 async function calcularScore(vaga, aupair) {
-  const scoreFields = ["natacao", "escolaridade", "idiomas", "religiao", "habilitacao", "quantidade_criancas", "experiencia_trabalho", "genero", "nacionalidade", "carro_exclusivo", "receber_newsletter", "data_disponibilidade"];
+  const scoreFields = ["escolaridade", "idiomas", "religiao", "quantidade_criancas", "experiencia_trabalho", "genero", "nacionalidade", "habilitacao", "carro_exclusivo", "natacao", "faixa_etaria"];
   let score = 0;
+
+  aupair.faixa_etaria = obterFaixaEtaria(aupair.data_de_nascimento);
 
   for (let j = 0; j < scoreFields.length; j++) {
     if (vaga[scoreFields[j]] !== undefined && aupair[scoreFields[j]] !== undefined) {
@@ -21,9 +25,32 @@ async function calcularScore(vaga, aupair) {
         if (intersection.length > 0) {
           score += intersection.length / aupair[scoreFields[j]].length;
         }
+        else if (scoreFields[j] === "faixa_etaria") {
+          if (vaga[scoreFields[j]].includes("Qualquer Idade") ||
+            (aupair.data_de_nascimento !== undefined &&
+              vaga[scoreFields[j]].includes(aupair.data_de_nascimento))) {
+            score += 1;
+          }
+        }
+        else if (scoreFields[j] === "idiomas") {
+          if (vaga[scoreFields[j]].includes("Qualquer Idioma")) {
+            score += 1;
+          }
+        }
       } else {
-        if (vaga[scoreFields[j]].toString() === aupair[scoreFields[j]].toString()) {
+        if (vaga[scoreFields[j]]?.toString() === aupair[scoreFields[j]]?.toString() ||
+          vaga[scoreFields[j]] === "Qualquer Nacionalidade" ||
+          vaga[scoreFields[j]] === "Qualquer Gênero" ||
+          vaga[scoreFields[j]] === "Qualquer Religião" ||
+          vaga[scoreFields[j]] === "Qualquer Escolaridade" ||
+          vaga[scoreFields[j]] === "Não especificado"
+        ) {
           score += 1;
+        }
+        else if (scoreFields[j] === "habilitacao" || scoreFields[j] === "natacao") {
+          if (vaga[scoreFields[j]] === false) {
+            score += 1;
+          }
         }
       }
     }
@@ -32,35 +59,110 @@ async function calcularScore(vaga, aupair) {
   return `${(score * 100 / scoreFields.length).toFixed(0)}%`;
 }
 
+function obterFaixaEtaria(dataDeNascimento) {
+  const agora = new Date();
+  let idade = agora.getFullYear() - dataDeNascimento.getFullYear();
+  const mesAtual = agora.getMonth();
+  const mesDeNascimento = dataDeNascimento.getMonth();
+
+  if (mesAtual < mesDeNascimento || (mesAtual === mesDeNascimento && agora.getDate() < dataDeNascimento.getDate())) {
+    idade--;
+  }
+
+  if (idade >= 51) {
+    return "51+";
+  } else if (idade >= 41) {
+    return "41-50";
+  } else if (idade >= 31) {
+    return "31-40";
+  } else if (idade >= 22) {
+    return "22-30";
+  } else if (idade >= 18) {
+    return "18-21";
+  } else {
+    return "Qualquer Idade";
+  }
+}
+
 exports.listarVagas = async (req, res) => {
   try {
     if (req.userRoles.includes("ROLE_FAMILY")) {
-      const vagas = await Vaga.find({ user: mongoose.Types.ObjectId(req.userId) }).lean();
+      const vagas = await Vaga.find({ user: mongoose.Types.ObjectId(req.userId) })
+        .lean();
       return res.json(vagas);
     }
 
     if (req.userRoles.includes("ROLE_AUPAIR")) {
-      const vagas = await Vaga.find({ "aupair.0": { $ne: mongoose.Types.ObjectId(req.userId) } }).lean();
+      const vagas = await Vaga.find({
+        $and: [
+          { ativo: { $ne: false } },
+          { "aupair.0": { $ne: mongoose.Types.ObjectId(req.userId) } },
+          { "candidaturas.aupairId": { $ne: mongoose.Types.ObjectId(req.userId) } }
+        ]
+      }).lean();
 
       if (!vagas) {
         return res.status(404).json({ message: "Nenhuma vaga encontrada." });
       }
 
-      const aupair = await AupairProfile.findOne({ user: req.userId }).lean();
+      const profile = await AupairProfile.findOne({ user: req.userId }).lean();
 
-      if (!aupair) {
+      if (!profile) {
         return res.status(404).json({ message: "Perfil de Au Pair não encontrado." });
       }
 
       for (let i = 0; i < vagas.length; i++) {
         vagas[i].score = "0%";
-        vagas[i].views += 1;
-        await Vaga.updateOne({ _id: vagas[i]._id }, { $inc: { views: 1 } });
 
-        vagas[i].score = await calcularScore(vagas[i], aupair);
+        // Verifica se a usuária já visualizou a vaga antes de incrementar a contagem de visualizações
+        const visualizacao = await Visualizacao.findOne({
+          vaga: vagas[i]._id,
+          usuario: req.userId
+        });
+
+        if (!visualizacao) {
+          vagas[i].views += 1;
+          await Vaga.updateOne({ _id: vagas[i]._id }, { $inc: { views: 1 } });
+
+          // Registra a visualização da usuária na coleção "Visualizações"
+          await Visualizacao.create({
+            vaga: vagas[i]._id,
+            usuario: req.userId
+          });
+        }
+
+        vagas[i].score = await calcularScore(vagas[i], profile);
+
+        const ObjectID = require('mongodb').ObjectID;
+        const isSaved = vagas[i].aupair.find(a => String(a._id) === String(ObjectID(req.userId)))?.saved || false;
+
+        // Adiciona o campo "isSaved" na própria vaga
+        vagas[i].isSaved = isSaved;
       }
 
+      // // Remove o array "aupair" da resposta
+      const vagasSemAupair = vagas.map(vaga => {
+        const { aupair, ...rest } = vaga;
+        return rest;
+      });
+
+      return res.json(vagasSemAupair);
+    }
+    else if (req.userRoles.includes("ROLE_AGENCY")) {
+
+    // Recupere as vagas que correspondem aos critérios da agência
+    const vagas = await Vaga.find({})
+      .select("-aupair -candidaturas") // Exclua os campos "aupair" e "candidaturas"
+      .lean();
+
+      // Verifique se foram encontradas vagas
+      if (vagas.length === 0) {
+        return res.status(404).json({ message: "Nenhuma vaga encontrada." });
+      }
+  
+      // Retorne as vagas
       return res.json(vagas);
+
     }
 
     return res.status(403).json({ message: "Acesso negado." });
@@ -121,29 +223,23 @@ exports.candidaturas = (req, res) => {
 
 exports.criarvaga = async (req, res) => {
   try {
-    // // Verifica se o usuário já possui uma vaga cadastrada
-    // const vagaExistente = await Vaga.findOne({ user: req.userId });
-    // if (vagaExistente) {
-    //   return res.status(400).json({ message: 'Usuário já possui uma vaga cadastrada.' });
-    // }
-
-
-    // // Verifica se o o dado passo é permitido
-    // const idiomasPermitidos = ["Inglês", "Espanhol", "Francês", "Alemão", "Italiano", "Português"];
-
-    // let idiomas;
-
-    // if (req.body.idiomas && idiomasPermitidos.includes(req.body.idiomas)) {
-    //   idiomas = req.body.idiomas;
-    // } else {
-    //   idiomas = ["Não especificado"];
-    // }
-
-    // Verifique se o usuário tem a função "ROLE_FAMILY"
-    if (!req.userRoles.includes("ROLE_FAMILY")) {
+    if (!req.userRoles.includes("ROLE_FAMILY") && !req.userRoles.includes("ROLE_AGENCY")) {
       return res.status(403).json({ message: 'Você não tem permissão para criar uma vaga.' });
     }
 
+    let pais;
+
+    if (req.body.pais) {
+      if (req.body.pais === "br") {
+        pais = "Brasil";
+      } else if (req.body.pais === "usa") {
+        pais = "Estados Unidos";
+      } else {
+        pais = req.body.pais;
+      }
+    } else {
+      pais = "Não especificado";
+    }
 
     const vaga = new Vaga({
       escolaridade: req.body.escolaridade,
@@ -160,33 +256,42 @@ exports.criarvaga = async (req, res) => {
       data_disponibilidade: req.body.data_disponibilidade,
       data_finalizacao_vaga: req.body.data_finalizacao_vaga,
       titulo_vaga: req.body.titulo_vaga,
-      vaga_patrocinada: req.body.vaga_patrocinada,
-      pais: req.body.pais,
+      pais: pais,
       estado_provincia: req.body.estado_provincia,
       quantidade_criancas: req.body.quantidade_criancas,
       descricao: req.body.descricao,
       natacao: req.body.natacao,
       habilitacao: req.body.habilitacao,
       carro_exclusivo: req.body.carro_exclusivo,
-      user: req.userId
+      user: req.userId,
+      exclusivo_agencia: req.userRoles.includes("ROLE_AGENCY") ? true : false
     });
 
     const novaVaga = await vaga.save();
 
     res.status(201).json(novaVaga);
-  } catch (error) {
-    console.error(error);
-    if (error.name === "ValidationError") {
-      res.status(400).json({ message: `Erro de validação: ${error.message}` });
+  } catch (err) {
+    console.error(err);
+    if (err instanceof mongoose.Error.ValidationError) {
+      res.status(422).json({ message: "Validation Error", errors: err.errors });
     } else {
-      res.status(500).json({ message: 'Erro ao criar a vaga.' });
+      res.status(500).json({ message: "Server Error" });
     }
   }
 }
 
+
 exports.createAupairProfile = async (req, res) => {
+
+  const existingAupair = await AupairProfile.findOne({ user: req.userId });
+
+  if (existingAupair) {
+    return res.status(409).json({ message: "Aupair profile already exists" });
+  }
+
   try {
     const {
+      nome_completo,
       telefone,
       cep,
       logradouro,
@@ -201,9 +306,7 @@ exports.createAupairProfile = async (req, res) => {
       genero,
       nacionalidade,
       numero_identificacao_nacional,
-      resumo,
-      passaporte,
-      habilitacao_pid,
+      tipo_documento,
       habilitacao,
       quantidade_criancas,
       experiencia_trabalho,
@@ -211,9 +314,18 @@ exports.createAupairProfile = async (req, res) => {
       carro_exclusivo,
       receber_newsletter,
       data_disponibilidade,
+      passaporte,
     } = req.body;
 
+    const dob = new Date(data_de_nascimento);
+    const ageInMs = Date.now() - dob.getTime();
+    const ageInYears = ageInMs / (1000 * 60 * 60 * 24 * 365.25);
+    if (ageInYears < 18) {
+      return res.status(400).json({ message: "Aupair must be at least 18 years old to create a profile" });
+    }
+
     const newAupair = new AupairProfile({
+      nome_completo,
       telefone,
       cep,
       logradouro,
@@ -228,9 +340,7 @@ exports.createAupairProfile = async (req, res) => {
       genero,
       nacionalidade,
       numero_identificacao_nacional,
-      resumo,
-      passaporte,
-      habilitacao_pid,
+      tipo_documento,
       habilitacao,
       quantidade_criancas,
       experiencia_trabalho,
@@ -238,6 +348,7 @@ exports.createAupairProfile = async (req, res) => {
       carro_exclusivo,
       receber_newsletter,
       data_disponibilidade,
+      passaporte,
       user: req.userId
     });
 
@@ -246,7 +357,11 @@ exports.createAupairProfile = async (req, res) => {
     res.status(201).json(savedAupair);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Server Error" });
+    if (err instanceof mongoose.Error.ValidationError) {
+      res.status(422).json({ message: "Validation Error", errors: err.errors });
+    } else {
+      res.status(500).json({ message: "Server Error" });
+    }
   }
 };
 
@@ -277,6 +392,56 @@ exports.deleteAupairProfile = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server Error" });
+  }
+};
+
+exports.updateAupairProfile = async (req, res) => {
+  try {
+    // Encontra o perfil da aupair pelo ID do usuário
+    const profile = await AupairProfile.findOne({ user: req.userId });
+
+    if (!profile) {
+      return res.status(404).json({ message: 'Perfil não encontrado.' });
+    }
+
+    // Verifica se o usuário tem permissão para editar a vaga
+    if (profile.user.toString() !== req.userId) {
+      return res.status(403).json({ message: 'Você não tem permissão para editar este perfil.' });
+    }
+
+    // Atualiza os atributos do perfil com os valores enviados na requisição
+    profile.nome_completo = req.body.nome_completo || profile.nome_completo;
+    profile.telefone = req.body.telefone || profile.telefone;
+    profile.cep = req.body.cep || profile.cep;
+    profile.logradouro = req.body.logradouro || profile.logradouro;
+    profile.numero = req.body.numero || profile.numero;
+    profile.complemento = req.body.complemento || profile.complemento;
+    profile.cidade = req.body.cidade || profile.cidade;
+    profile.estado = req.body.estado || profile.estado;
+    profile.data_de_nascimento = req.body.data_de_nascimento || profile.data_de_nascimento;
+    profile.escolaridade = req.body.escolaridade || profile.escolaridade;
+    profile.idiomas = req.body.idiomas || profile.idiomas;
+    profile.religiao = req.body.religiao || profile.religiao;
+    profile.genero = req.body.genero || profile.genero;
+    profile.nacionalidade = req.body.nacionalidade || profile.nacionalidade;
+    profile.habilitacao = req.body.habilitacao || profile.habilitacao;
+    profile.quantidade_criancas = req.body.quantidade_criancas || profile.quantidade_criancas;
+    profile.experiencia_trabalho = req.body.experiencia_trabalho || profile.experiencia_trabalho;
+    profile.natacao = req.body.natacao || profile.natacao;
+    profile.carro_exclusivo = req.body.carro_exclusivo || profile.carro_exclusivo;
+    profile.receber_newsletter = req.body.receber_newsletter || profile.receber_newsletter;
+    profile.data_disponibilidade = req.body.data_disponibilidade || profile.data_disponibilidade;
+    profile.numero_identificacao_nacional = req.body.numero_identificacao_nacional || profile.numero_identificacao_nacional;
+    profile.tipo_documento = req.body.tipo_documento || profile.tipo_documento;
+    profile.passaporte = req.body.passaporte || profile.passaporte;
+
+    // Salva o perfil atualizado no banco de dados
+    const updatedProfile = await profile.save();
+
+    res.json(updatedProfile);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro ao atualizar o perfil.' });
   }
 };
 
@@ -330,64 +495,295 @@ exports.deletarVaga = async (req, res, next) => {
   }
 };
 
-exports.deleteCandidatura = (req, res) => {
-  Candidatura.find({ 'vaga.0': mongoose.Types.ObjectId(req.query.vagaID) }).deleteOne().exec()
-  Vaga.findById(req.query.vagaID)
-    .exec((err, vaga) => {
-      if (err) {
-        res.status(500).send({ message: err });
-        return;
-      }
+exports.updateVaga = async(req, res) => {
+  try {
+    // Verifica se a vaga existe
+    const vaga = await Vaga.findById(req.params.id);
 
-      vaga.escolha = false
+    if (!vaga) {
+      return res.status(404).json({ message: 'Vaga não encontrada.' });
+    }
+    // Verifica se o usuário tem permissão para editar a vaga
+    if (vaga.user.toString() !== req.userId) {
+      return res.status(403).json({ message: 'Você não tem permissão para editar esta vaga.' });
+    }
 
-      vaga.aupair.pull(req.query.aupairID);
+    // Atualiza os atributos da vaga com os valores enviados na requisição
+    vaga.escolaridade = req.body.escolaridade || vaga.escolaridade;
+    vaga.idiomas = req.body.idiomas || vaga.idiomas;
+    vaga.religiao = req.body.religiao || vaga.religiao;
+    vaga.genero = req.body.genero || vaga.genero;
+    vaga.nacionalidade = req.body.nacionalidade || vaga.nacionalidade;
+    vaga.faixa_etaria = req.body.faixa_etaria || vaga.faixa_etaria;
+    vaga.experiencia_trabalho = req.body.experiencia_trabalho || vaga.experiencia_trabalho;
+    vaga.quantidade_criancas = req.body.quantidade_criancas || vaga.quantidade_criancas;
+    vaga.resumo = req.body.resumo || vaga.resumo;
+    vaga.receber_newsletter = req.body.receber_newsletter || vaga.receber_newsletter;
+    vaga.data_disponibilidade = req.body.data_disponibilidade || vaga.data_disponibilidade;
+    vaga.data_finalizacao_vaga = req.body.data_finalizacao_vaga || vaga.data_finalizacao_vaga;
+    vaga.titulo_vaga = req.body.titulo_vaga || vaga.titulo_vaga;
+    vaga.pais = req.body.pais || vaga.pais;
+    vaga.estado_provincia = req.body.estado_provincia || vaga.estado_provincia;
+    vaga.descricao = req.body.descricao || vaga.descricao;
+    vaga.natacao = req.body.natacao || vaga.natacao;
+    vaga.habilitacao = req.body.habilitacao || vaga.habilitacao;
+    vaga.carro_exclusivo = req.body.carro_exclusivo || vaga.carro_exclusivo;
+    vaga.score = req.body.score || vaga.score;
 
-      vaga.save(err => {
-        if (err) {
-          res.status(500).send({ message: err });
-          return;
-        }
+    // Salva a vaga atualizada no banco de dados
+    const updatedVaga = await vaga.save();
 
-        res.send({ message: "Candidatura Deletada com sucesso" });
-      });
-    });
+    res.json(updatedVaga);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro ao atualizar a vaga.' });
+  }
+}
+exports.consultarVagaPorId = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const vaga = await Vaga.findOne({ _id: id, user: req.userId }).populate('user');
+    if (!vaga) {
+      return res.status(404).json({ mensagem: 'Vaga não encontrada.' });
+    }
+    res.json(vaga);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ mensagem: 'Erro ao consultar a vaga.' });
+  }
+};
+
+exports.deleteCandidatura = async (req, res) => {
+  try {
+    const vaga = await Vaga.findById(req.params.id);
+    if (!vaga) {
+      return res.status(404).json({ message: 'Vaga não encontrada' });
+    }
+
+    // Encontrar a candidatura da Au Pair na vaga
+    const candidatura = vaga.candidaturas.find(
+      (candidatura) =>
+        candidatura.aupairId.toString() === req.userId 
+    );
+    if (!candidatura) {
+      return res
+        .status(404)
+        .json({ message: 'Candidatura não encontrada para essa Au Pair nesta vaga' });
+    }
+
+    // Remover a candidatura da lista de candidaturas da vaga
+    vaga.candidaturas = vaga.candidaturas.filter(
+      (candidatura) =>
+        candidatura.aupairId.toString() !== req.userId
+    );
+
+    // Salvar as alterações na vaga
+    await vaga.save();
+
+    return res.status(200).json({ message: 'Candidatura removida com sucesso' });
+  } catch (err) {
+    console.error(err.message);
+    return res.status(500).json({ message: 'Erro ao apagar candidatura da Au Pair para vaga' });
+  }
 
 }
 
-exports.candidatarse = (req, res) => {
-  const candidatura = new Candidatura({
-    vaga: req.query.vagaID,
-    aupair: req.userId,
-    escolha: false
-  })
+exports.criarCandidatura = async (req, res) => {
+  try {
+    const vagaID = req.query.vagaID;
+    const userId = req.userId;
 
-  Vaga.findById(req.query.vagaID)
-    .exec((err, vaga) => {
-      if (err) {
-        res.status(500).send({ message: err });
-        return;
-      }
+    // Procura a vaga correspondente ao ID fornecido
+    const vaga = await Vaga.findById(vagaID);
 
-      candidatura.user = vaga.user
-      candidatura.save()
+    if (!vaga) {
+      return res.status(404).json({ error: "Vaga não encontrada" });
+    }
 
-      vaga.aupair.push(req.query.aupairID);
-      vaga.save(err => {
-        if (err) {
-          res.status(500).send({ message: err });
-          return;
-        }
+    // Verifica se a aupair já se candidatou a essa vaga
+    const candidaturaExistente = vaga && vaga.candidaturas && vaga.candidaturas.find(
+      (candidatura) => String(candidatura.aupairId) === userId
+    );
+    if (candidaturaExistente) {
+      return res
+        .status(400)
+        .json({ error: "Aupair já se candidatou a essa vaga" });
+    }
 
-        res.send({ message: "Candidatura Feita" });
-      });
+    // Adiciona uma nova candidatura à vaga
+    vaga.candidaturas.push({ aupairId: userId });
+    await vaga.save();
 
+    const user = await User.findById(vaga.user).populate("roles");
 
-      if (!vaga) {
-        return res.status(404).send({ message: "Vaga não encontrada." });
-      }
+    const aupairProfile = await AupairProfile.findOne({ user: req.userId }).lean();
+
+    const userAupair = await User.findById(aupairProfile.user).populate("roles");
+
+    // Configurar o transporter do nodemailer
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
     });
 
+    const mailOptions = {
+      from: 'Aupamatch <aupamatch.webbstars@gmail.com>',
+      to: user.email,
+      subject: 'Nova candidatura na vaga',
+      html: `
+      <p>Olá,</p>
+      <p>Uma nova candidatura foi feita para a sua vaga de Au Pair.</p>
+      <p>Segue abaixo algumas informações sobre a candidata/o:</p>
+      <ul>
+        <li>Nome completo: ${aupairProfile.nome_completo}</li>
+        <li>Email: ${userAupair.email}</li>
+        <li>Idiomas: ${aupairProfile.idiomas.join(", ")}</li>
+        <li>Experiência de trabalho: ${aupairProfile.experiencia_trabalho} anos</li>
+        <li>Gênero: ${aupairProfile.genero}</li>
+        <li>Religião: ${aupairProfile.religiao}</li>
+        <li>Data de disponibilidade: ${aupairProfile.data_disponibilidade}</li>
+        <li>Número de crianças que pode cuidar: ${aupairProfile.quantidade_criancas}</li>
+        <li>Possui habilitação: ${aupairProfile.habilitacao ? 'Sim' : 'Não'}</li>
+        <li>Nacionalidade: ${aupairProfile.nacionalidade}</li>
+      </ul>
+      <p>Entre em contato com a candidata/o para mais informações sobre o perfil dela/e.</p>
+    `
+    };
+  
+    await transporter.sendMail(mailOptions);
+  
+    res.status(200).json({
+      message: 'Um email foi enviado com a candidadura da aupair',
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro interno do servidor' });
+  }
+};
+
+exports.getCandidaturasByUserId = async (req, res) => {
+  try {
+    const vagas = await Vaga.find({ user: req.userId })
+    const candidaturas = vagas.reduce((acc, vaga) => [...acc, ...vaga.candidaturas], []);
+    res.json(candidaturas);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send('Ocorreu um erro ao buscar as candidaturas.');
+  }
+};
+
+exports.getCandidaturasByAupairId = async (req, res) => {
+  try {
+    const vagas = await Vaga.aggregate([
+      // Filtra vagas com candidaturas da aupair atual
+      {
+        $match: { "candidaturas.aupairId": mongoose.Types.ObjectId(req.userId) },
+      },
+      // Desconstrói o array "candidaturas" em documentos separados
+      { $unwind: "$candidaturas" },
+      // Filtra apenas as candidaturas da aupair atual
+      {
+        $match: { "candidaturas.aupairId": mongoose.Types.ObjectId(req.userId) },
+      },
+      // Junta as informações da vaga e da candidatura em um mesmo documento
+      {
+        $project: {
+          _id: 1,
+          escolaridade: 1,
+          idiomas: 1,
+          religiao: 1,
+          genero: 1,
+          nacionalidade: 1,
+          faixa_etaria: 1,
+          experiencia_trabalho: 1,
+          quantidade_criancas: 1,
+          receber_newsletter: 1,
+          data_disponibilidade: 1,
+          data_finalizacao_vaga: 1,
+          titulo_vaga: 1,
+          vaga_patrocinada: 1,
+          pais: 1,
+          estado_provincia: 1,
+          descricao: 1,
+          natacao: 1,
+          habilitacao: 1,
+          carro_exclusivo: 1,
+          views: 1,
+          user: 1,
+          resumo: 1,
+          passaporte: 1,
+          aupair: "$candidaturas.aupair",
+          candidatura: "$candidaturas",
+        },
+      },
+    ]);
+    res.json(vagas);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Erro ao recuperar vagas candidatadas" });
+  }
+  
+};
+
+exports.deletarCandidatura = async (req, res) => {
+  try {
+    const vaga = await Vaga.findOne({ _id: req.params.idVaga, "candidaturas.aupairId": req.userId });
+  
+    if (!vaga) {
+      return res.status(404).json({ mensagem: "Candidatura não encontrada." });
+    }
+  
+    vaga.candidaturas = vaga.candidaturas.filter((candidatura) => candidatura.aupairId.toString() !== req.userId);
+    await vaga.save();
+  
+    return res.status(200).json({ mensagem: "Candidatura deletada com sucesso." });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ mensagem: "Erro ao deletar candidatura." });
+  }
+};
+
+exports.updateUserCredentials = async (req, res) => {
+  try {
+    const { password, name, currentPassword } = req.body;
+
+    // Find the user by their ID
+    const user = await User.findById(req.userId);
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ message: 'A senha deve ter pelo menos 8 caracteres' });
+    }
+
+    // Verify if the current password is correct
+
+    const isPasswordValid = bcrypt.compareSync(currentPassword, user.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ message: 'Invalid current password.' });
+    }
+
+    // Update the user's email and/or password if provided
+    if (password) {
+      user.password = bcrypt.hashSync(password, 8);
+    }
+    if (name) {
+      user.name = name;
+    }
+
+    // Save the updated user in the database
+    const updatedUser = await user.save();
+
+    res.json(updatedUser);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error updating user credentials.' });
+  }
 };
 
 exports.match = (req, res) => {
@@ -438,24 +834,6 @@ exports.match = (req, res) => {
 
 };
 
-
-exports.getcandidaturas = (req, res) => {
-  Candidatura.find({ $or: [{ "user.0": mongoose.Types.ObjectId(req.query.id) }, { "aupair.0": mongoose.Types.ObjectId(req.query.id) }] })
-    .exec((err, candidatura) => {
-      if (err) {
-        res.status(500).send({ message: err });
-        return;
-      }
-
-      if (!candidatura) {
-        return res.status(404).send({ message: "Vaga não encontrada." });
-      }
-
-      res.json(candidatura);
-    });
-
-};
-
 exports.favoritarVaga = async (req, res) => {
   try {
     const idAupair = req.userId;
@@ -489,20 +867,77 @@ exports.favoritarVaga = async (req, res) => {
 
 exports.listarVagasSalvas = async (req, res) => {
   try {
-    const idAupair = req.userId;
+    if (req.userRoles.includes("ROLE_FAMILY")) {
+      const vagas = await Vaga.find({ user: mongoose.Types.ObjectId(req.userId) })
+        .lean();
+      return res.json(vagas);
+    }
 
-    const vagas = await Vaga.find({
-      aupair: {
-        $elemMatch: {
-          _id: idAupair,
-          saved: true
+    if (req.userRoles.includes("ROLE_AUPAIR")) {
+      const vagas = await Vaga.find({ "aupair.0": { $ne: mongoose.Types.ObjectId(req.userId) } })
+        .lean();
+
+      if (!vagas) {
+        return res.status(404).json({ message: "Nenhuma vaga encontrada." });
+      }
+
+      const profile = await AupairProfile.findOne({ user: req.userId }).lean();
+
+      if (!profile) {
+        return res.status(404).json({ message: "Perfil de Au Pair não encontrado." });
+      }
+
+      const savedVagas = [];
+
+      for (let i = 0; i < vagas.length; i++) {
+        vagas[i].score = "0%";
+
+        // Verifica se a usuária já visualizou a vaga antes de incrementar a contagem de visualizações
+        const visualizacao = await Visualizacao.findOne({
+          vaga: vagas[i]._id,
+          usuario: req.userId
+        });
+
+        if (!visualizacao) {
+          vagas[i].views += 1;
+          await Vaga.updateOne({ _id: vagas[i]._id }, { $inc: { views: 1 } });
+
+          // Registra a visualização da usuária na coleção "Visualizações"
+          await Visualizacao.create({
+            vaga: vagas[i]._id,
+            usuario: req.userId
+          });
+        }
+
+        vagas[i].score = await calcularScore(vagas[i], profile);
+
+        const ObjectID = require('mongodb').ObjectID;
+        const isSaved = vagas[i].aupair.find(a => String(a._id) === String(ObjectID(req.userId)))?.saved || false;
+
+        // Adiciona o campo "isSaved" na própria vaga
+        vagas[i].isSaved = isSaved;
+
+        // Adiciona a vaga à lista de vagas salvas se o campo isSaved for verdadeiro
+        if (isSaved) {
+          savedVagas.push(vagas[i]);
         }
       }
-    }).populate("user", "nome email");
 
-    res.status(200).json(vagas);
+      // // Remove o array "aupair" da resposta
+      const vagasSemAupair = savedVagas.map(vaga => {
+        const { aupair, ...rest } = vaga;
+        return rest;
+      });
+
+
+
+      return res.json(vagasSemAupair);
+    }
+
+    return res.status(403).json({ message: "Acesso negado." });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error(error);
+    res.status(500).json({ message: "Erro ao buscar vagas." });
   }
 };
 
@@ -594,3 +1029,547 @@ exports.SendEmail = async (req, res) => {
     res.status(500).json({ message: "Erro ao enviar e-mails" });
   }
 };
+
+const generateResetCode = () => {
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const expires = new Date();
+  expires.setMinutes(expires.getMinutes() + 30); // código válido por 30 minutos
+  return { code, expires, isValid: false }; // retorna também a informação de validade
+};
+
+exports.sendResetToken = async (req, res) => {
+  try {
+    const { email } = req.body;
+  
+    // Verifica se o email existe no banco de dados
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ message: 'Email não encontrado' });
+    }
+  
+    const { code, expires, isValid } = generateResetCode();
+    user.passwordResetCode = code;
+    user.passwordResetExpires = expires;
+    user.passwordResetCodeValid = isValid; // salva a informação de validade
+    await user.save();
+   
+    // Envia um email com o código de redefinição de senha
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    const mailOptions = {
+      from: 'Aupamatch <aupamatch.webbstars@gmail.com>',
+      to: user.email,
+      subject: 'Redefinir senha',
+      text: `Codigo para redefinir sua senha: ${code}`,
+    };
+  
+    await transporter.sendMail(mailOptions);
+  
+    res.status(200).json({
+      message: 'Um email foi enviado com um código para redefinir sua senha',
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro interno do servidor' });
+  }
+};
+
+exports.validateResetCode = async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    // Verifica se o email existe no banco de dados
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ message: 'Email não encontrado' });
+    }
+
+    // Verifica se o code de reset de senha é válido
+    if (user.passwordResetCode !== code) {
+      return res.status(400).json({ message: 'Code inválido' });
+    }
+
+    // Verifica se o code de reset de senha expirou
+    if (user.passwordResetExpires < Date.now()) {
+      return res.status(400).json({ message: 'Code expirado' });
+    }
+
+    // Atualiza o campo passwordResetCodeValid para true
+    user.passwordResetCodeValid = true;
+    await user.save();
+
+    res.status(200).json({ message: 'Code válido' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro interno do servidor' });
+  }
+};
+
+// Rota para redefinir a senha
+exports.resetPassword = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Verifica se o email existe no banco de dados
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ message: 'Email não encontrado' });
+    }
+
+    if (!user.passwordResetCodeValid) {
+      return res.status(400).json({ message: 'Código não validado' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ message: 'A senha deve ter pelo menos 8 caracteres' });
+    }
+
+    // Define a nova senha e limpa o código de redefinição de senha
+    user.passwordResetCodeValid = false; // código utilizado, invalida o código
+    user.password = bcrypt.hashSync(password, 8);
+    user.passwordResetCode = undefined;
+    user.passwordResetExpires = undefined;
+    await user.save();
+
+    res.status(200).json({ message: 'Senha redefinida com sucesso' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro interno do servidor' });
+  }
+};
+
+exports.userprofile = (req, res) => {
+  User.findById(req.userId)
+    .populate("roles", "-__v -_id")
+    .exec((err, user) => {
+      if (err) {
+        res.status(500).send({ message: err });
+        return;
+      }
+
+      if (!user) {
+        return res.status(404).send({ message: "User Not found." });
+      }
+
+      const roles = user.roles.map(role => "ROLE_" + role.name.toUpperCase());
+
+      const userProfile = {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        roles: roles,
+        pagamentoMaisCandidaturas: user.pagamentoMaisCandidaturas,
+        pagamentoPublicador: user.pagamentoPublicador
+      };
+
+      res.json(userProfile);
+    });
+};
+
+exports.loginHistory = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).send({ message: "Usuário não encontrado" });
+    }
+
+    const loginHistory = user.loginHistory.map(({ _id, ipAddress, date }) => ({
+      _id,
+      ipAddress,
+      date,
+    }));
+    res.status(200).send(loginHistory);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Erro interno do servidor" });
+  }
+};
+
+
+exports.statusVaga = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const vaga = await Vaga.findById(id);
+    
+    if (!vaga) {
+      return res.status(404).json({ error: "Vaga não encontrada." });
+    }
+    
+    if (String(vaga.user) !== req.userId) {
+      return res.status(401).json({ error: "Usuário não autorizado." });
+    }
+
+    vaga.ativo = !vaga.ativo;
+    await vaga.save();
+    
+    return res.status(200).json(vaga);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Erro ao ativar/desativar a vaga." });
+  }
+};
+
+exports.agenciarVaga = async (req, res) => {
+  try {
+    const vagaId  = req.params.id;
+
+    // Verificar se o usuário tem permissão de agenciar a vaga
+    if (!req.userRoles.includes('ROLE_AGENCY')) {
+      return res.status(403).json({ message: 'Você não tem permissão para agenciar uma vaga.' });
+    }
+
+    // Verificar se a vaga existe
+    const vaga = await Vaga.findById(vagaId);
+    if (!vaga) {
+      return res.status(404).json({ message: 'Vaga não encontrada.' });
+    }
+
+    // Verificar se a vaga já está agenciada por outra agência
+    if (vaga.exclusivo_agencia) {
+      return res.status(403).json({ message: 'Esta vaga já está agenciada por outra agência.' });
+    }
+
+    // Atualizar a vaga com o ID da agência agenciadora
+    vaga.agenciaAgenciadora = req.userId;
+    vaga.exclusivo_agencia = true;
+    const vagaAgenciada = await vaga.save();
+
+    res.status(200).json(vagaAgenciada);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Erro do servidor.' });
+  }
+};
+
+paypal.configure({
+  mode: 'sandbox',
+  client_id: process.env.CLIENT_ID,
+  client_secret: process.env.CLIENT_SECRET
+});
+
+// controller for handling the cancel URL
+exports.cancel = (req, res) => {
+  res.send('Payment cancelled');
+};
+
+/* paypal.webProfile.create({
+  name: "Webbstars",
+  presentation: {
+    brand_name: "Webbstars",
+    logo_image: "https://www.example.com/logo.png",
+    locale_code: "US"
+  },
+  input_fields: {
+    no_shipping: 1,
+    address_override: 0
+  }
+}, function (error, profile) {
+  if (error) {
+    console.log(error);
+  } else {
+    console.log("Web experience profile created with ID: " + profile.id);
+  }
+}); */
+
+// controller for handling the return URL
+exports.success = (req, res) => {
+  const paymentId = req.query.paymentId;
+  const payerId = req.query.PayerID;
+  const details = { 'payer_id': payerId };
+  const vagaId = req.query.vagaId
+
+  // check if payment has already been processed
+  User.findOne({ 'purchaseHistory.paymentId': paymentId }, (err, user) => {
+    if (user) {
+      res.send('Payment has already been processed.');
+    } else {
+
+      paypal.payment.execute(paymentId, details, (error, payment) => {
+        if (error) {
+          console.error(error);
+          res.status(500).send('Error processing payment');
+        } else {
+          // payment successful, update your database or perform any other required action
+
+          const userId = payment.transactions[0].custom;
+
+          let shouldUpdatePaymentStatus = true; // Adicione essa variável antes do switch case
+          switch(payment.transactions[0].item_list.items[0].name) {
+            case 'Candidatar em mais que 5 vagas':
+              paymentStatusField = 'pagamentoMaisCandidaturas';
+              break;
+            case 'Publicador de Vagas':
+              paymentStatusField = 'pagamentoPublicador';
+              break;
+            case 'Vaga Patrocinada':
+              shouldUpdatePaymentStatus = false; // Adicione esse if dentro do switch case
+              Vaga.findByIdAndUpdate(vagaId, { vaga_patrocinada: true }, { new: true }, (err, updatedVaga) => {
+                if (err) {
+                  console.error(err);
+                  res.status(500).send('Error processing payment');
+                } else {
+                  console.log('Vaga patrocinada atualizada');
+                }})
+              break;
+            default:
+              console.error('Invalid payment type:', paymentType);
+              res.status(500).send('Error processing payment');
+          }
+            // update the user's payment status in the database
+            User.findOneAndUpdate(
+              { _id: userId },
+              { 
+                ...(shouldUpdatePaymentStatus && {[paymentStatusField]: true}), // Adicione esse if antes da linha que atualiza o usuário
+                $push: { // add an entry to the purchase history array
+                  purchaseHistory: {
+                    product: payment.transactions[0].item_list.items[0].name,
+                    value: parseFloat(payment.transactions[0].amount.total),
+                    paymentId: paymentId // add payment ID to the purchase history
+                  }
+                }
+              },
+              { new: true },
+              (err, user) => {
+                if (err) {
+                  console.error(err);
+                  res.status(500).send('Error processing payment');
+                } else {
+                  // check the user's roles and update the user object accordingly
+                  const confirmationHtml = `
+                  <div style="background-color: #fff; border: 1px solid #ccc; margin: 50px auto; max-width: 400px; padding: 20px;">
+                    <img src="https://www.paypalobjects.com/webstatic/en_US/i/buttons/checkout-logo-medium.png" alt="PayPal" style="float: left; margin-right: 20px;">
+                    <div style="font-size: 16px; color: #444; margin-top: 40px;">
+                      Seu pagamento de <strong>${payment.transactions[0].item_list.items[0].name}</strong> no valor de <strong>R$${parseFloat(payment.transactions[0].amount.total).toFixed(2)}</strong> foi concluído. Você pode voltar para o site da <a href="https://www.aupamatch.com/" style="color: #0070ba; text-decoration: none;">Aupamatch</a>.
+                    </div>
+                    <div style="clear: both;"></div>
+                  </div>
+                  `;
+                  res.send(confirmationHtml);
+                }
+              }
+            );
+        }
+      });
+    }
+  });
+};
+
+
+exports.pagamentoPublicador = async (req, res) => {
+
+  if (!req.userRoles.includes("ROLE_FAMILY") && !req.userRoles.includes("ROLE_AGENCY")) {
+    return res.status(403).json({ message: 'Você não tem permissão para acessar o pagamento do publicador de vagas.' });
+  }
+
+  const user = await User.findById(req.userId);
+
+  if (user.pagamentoPublicador) {
+    res.status(400).json({ message: 'O pagamento já foi efetuado.' });
+    return;
+  }
+
+  let baseUrl = '';
+
+  if (process.env.NODE_ENV === 'production') {
+    baseUrl = 'https://aupamatch-api3.onrender.com/';
+  } else {
+    baseUrl = 'http://localhost:8080/';
+  }
+  const paymentData = {
+    intent: 'sale',
+    payer: {
+      payment_method: 'paypal'
+    },
+    redirect_urls: {
+      return_url: `${baseUrl}api/success`,
+      cancel_url: `${baseUrl}api/cancel`
+    },
+    transactions: [{
+      item_list: {
+        items: [{
+          name: 'Publicador de Vagas',
+          sku: '001',
+          price: '100.00',
+          currency: 'BRL',
+          quantity: 1
+        }]
+      },
+      amount: {
+        currency: 'BRL',
+        total: '100.00'
+      },
+      description: 'Ative a opção de publicador de vaga',
+      custom: req.userId // add the ID of the user to the custom field
+    }],
+      experience_profile_id: 'XP-GP98-JA8J-GJRQ-LK9N'
+  };
+
+  paypal.payment.create(paymentData, (error, payment) => {
+    if (error) {
+      console.error(error);
+      res.sendStatus(500);
+    } else {
+      const approvalUrl = payment.links.find(link => link.rel === 'approval_url').href;
+      res.json({ approvalUrl });;
+    }
+  });
+};
+
+exports.pagamentoMaisCandidaturas = async (req, res) => {
+
+  if (req.userRoles.includes("ROLE_FAMILY")) {
+    return res.status(403).json({ message: 'Este pagamento é reservado às Aupairs' });
+  }
+
+  const user = await User.findById(req.userId);
+
+  if (user.pagamentoMaisCandidaturas) {
+    res.status(400).json({ message: 'O pagamento já foi efetuado.' });
+    return;
+  }
+
+  let baseUrl = '';
+
+  if (process.env.NODE_ENV === 'production') {
+    baseUrl = 'https://aupamatch-api3.onrender.com/';
+  } else {
+    baseUrl = 'http://localhost:8080/';
+  }
+  const paymentData = {
+    intent: 'sale',
+    payer: {
+      payment_method: 'paypal'
+    },
+    redirect_urls: {
+      return_url: `${baseUrl}api/success`,
+      cancel_url: `${baseUrl}api/cancel`
+    },
+    transactions: [{
+      item_list: {
+        items: [{
+          name: 'Candidatar em mais que 5 vagas',
+          sku: '001',
+          price: '25.00',
+          currency: 'BRL',
+          quantity: 1
+        }]
+      },
+      amount: {
+        currency: 'BRL',
+        total: '25.00'
+      },
+      description: 'Ative a opção de candidatar em mais que 5 vagas',
+      custom: req.userId // add the ID of the user to the custom field
+    }],
+      experience_profile_id: 'XP-GP98-JA8J-GJRQ-LK9N'
+  };
+
+  paypal.payment.create(paymentData, (error, payment) => {
+    if (error) {
+      console.error(error);
+      res.sendStatus(500);
+    } else {
+      const approvalUrl = payment.links.find(link => link.rel === 'approval_url').href;
+      res.json({ approvalUrl });;
+    }
+  });
+};
+
+exports.pagamentoVagaPatrocinada = async (req, res) => {
+
+  if (req.userRoles.includes("ROLE_AUPAIR")) {
+    return res.status(403).json({ message: 'Este pagamento é reservado às Famílias e Agências' });
+  }
+
+  const vaga = await Vaga.findById(req.params.id);
+
+  if (vaga.vaga_patrocinada) {
+    res.status(400).json({ message: 'A vaga já é patrocinada.' });
+    return;
+  }
+
+  if (vaga.user.toString() !== req.userId) {
+    return res.status(403).json({ message: 'Você não tem permissão para editar esta vaga.' });
+  }
+
+  let baseUrl = '';
+
+  if (process.env.NODE_ENV === 'production') {
+    baseUrl = 'https://aupamatch-api3.onrender.com/';
+  } else {
+    baseUrl = 'http://localhost:8080/';
+  }
+
+  console.log()
+  const paymentData = {
+    intent: 'sale',
+    payer: {
+      payment_method: 'paypal'
+    },
+    redirect_urls: {
+      return_url: `${baseUrl}api/success?vagaId=${req.params.id}`,
+      cancel_url: `${baseUrl}api/cancel`
+    },
+    transactions: [{
+      item_list: {
+        items: [{
+          name: 'Vaga Patrocinada',
+          sku: '001',
+          price: '25.00',
+          currency: 'BRL',
+          quantity: 1
+        }]
+      },
+      amount: {
+        currency: 'BRL',
+        total: '25.00'
+      },
+      description: 'Mudar o atributo da vaga para patrocinada',
+      custom: req.userId
+    }],
+      experience_profile_id: 'XP-GP98-JA8J-GJRQ-LK9N'
+  };
+
+  paypal.payment.create(paymentData, (error, payment) => {
+    if (error) {
+      console.error(error);
+      res.sendStatus(500);
+    } else {
+      const approvalUrl = payment.links.find(link => link.rel === 'approval_url').href;
+      res.json({ approvalUrl });;
+    }
+  });
+};
+exports.getCompraHistory = async (req, res) => {
+  
+  try {
+    const userId = req.userId;
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).send({ message: "Usuário não encontrado" });
+    }
+    const compraHistory = user.purchaseHistory;
+    res.status(200).send(compraHistory);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Erro interno do servidor" });
+  }
+};
+
+
+
+
+
+
+
+
+
+
+

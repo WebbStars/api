@@ -7,15 +7,18 @@ require('dotenv').config()
 const swaggerUi = require('swagger-ui-express');
 const YAML = require('yamljs');
 const swaggerDocument = YAML.load('./swagger.yaml');
+const scheduler = require("./app/controllers/scheduler.js");
 
 const app = express()
 
 app.use(helmet.contentSecurityPolicy({
   directives: {
     defaultSrc: ["'self'"],
-    connectSrc: ["'self'", "http://localhost:8080/"]
+    connectSrc: ["'self'", "https://aupamatch-api3.render.com/", "http://localhost:8080/"],
+    imgSrc: ["'self'", "https://www.paypalobjects.com"]
   }
 }));
+
 
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
@@ -32,6 +35,7 @@ app.use(express.urlencoded({ extended: true }));
 
 const db = require("./app/models");
 const Role = db.role;
+
 
 db.mongoose
   .connect(process.env.MONGODB_URI || `mongodb://${dbConfig.HOST}:${dbConfig.PORT}/${dbConfig.DB}`, {
@@ -51,16 +55,19 @@ db.mongoose
 app.get("/", (req, res) => {
   res.json({ message: "Welcome to Webbstars application." });
 });
+scheduler.start();
 
 // routes
 require("./app/routes/auth.routes")(app);
 require("./app/routes/user.routes")(app);
+
 
 // set port, listen for requests
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}.`);
 });
+
 
 function initial() {
   Role.estimatedDocumentCount((err, count) => {

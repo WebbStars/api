@@ -26,6 +26,18 @@ module.exports = function(app) {
     controller.deletarVaga
   );
 
+  app.put(
+    "/api/vaga/:id",
+    [authJwt.verifyToken],
+    controller.updateVaga
+  );
+
+  app.get(
+    "/api/vagas/:id",
+    [authJwt.verifyToken],
+    controller.consultarVagaPorId
+  );
+
   app.get(
     "/api/delcandidatura",
     [authJwt.verifyToken],
@@ -34,6 +46,10 @@ module.exports = function(app) {
 
   app.post(
     "/api/perfil",[authJwt.verifyToken], controller.createAupairProfile
+  );
+
+  app.put(
+    "/api/perfil",[authJwt.verifyToken], controller.updateAupairProfile
   );
 
   app.get(
@@ -61,6 +77,103 @@ module.exports = function(app) {
   app.get(
     "/api/candidatar",
     [authJwt.verifyToken],
-    controller.candidatarse
+    controller.criarCandidatura
   )
+
+  app.get(
+    "/api/vagas/candidaturas",
+    [authJwt.verifyToken],
+    controller.getCandidaturasByUserId
+  )
+
+  app.get(
+    "/api/minhas-candidaturas",
+    [authJwt.verifyToken],
+    controller.getCandidaturasByAupairId
+  )
+
+  app.delete(
+    "/api/vagas/:id/candidaturas",[authJwt.verifyToken], controller.deleteCandidatura
+  );
+
+  app.get(
+    "/api/userprofile",
+    [authJwt.verifyToken],
+    controller.userprofile
+  );
+
+  app.get(
+    "/api/login-history",
+    [authJwt.verifyToken],
+    controller.loginHistory
+  );
+
+  app.put(
+    "/api/userprofile",
+    [authJwt.verifyToken],
+    controller.updateUserCredentials
+  );
+  app.put(
+    "/api/vaga/:id/toggle",
+    [authJwt.verifyToken],
+    controller.statusVaga
+  );
+
+  app.post(
+    "/api/send-token",
+    controller.sendResetToken
+  );
+
+  app.post(
+    "/api/validate-token/",
+    controller.validateResetCode
+  );
+
+  app.patch(
+    "/api/reset-password/",
+    controller.resetPassword
+  );
+
+  app.post(
+    "/api/pagamento/publicador",
+    [authJwt.verifyToken],
+    controller.pagamentoPublicador
+  );
+
+  app.post(
+    "/api/agenciar-vaga/:id",
+    [authJwt.verifyToken],
+    controller.agenciarVaga
+  );
+
+
+  app.post(
+    "/api/pagamento/mais-candidaturas",
+    [authJwt.verifyToken],
+    controller.pagamentoMaisCandidaturas
+  );
+
+  app.post(
+    "/api/pagamento/vaga-patrocinada/:id",
+    [authJwt.verifyToken],
+    controller.pagamentoVagaPatrocinada
+  );
+
+  app.get(
+    "/api/success",
+    controller.success
+  );
+
+  app.get(
+    "/api/cancel",
+    controller.cancel
+  );
+
+  app.get(
+    "/api/compra-history",
+    [authJwt.verifyToken],
+    controller.getCompraHistory
+  );
 };
+
+
